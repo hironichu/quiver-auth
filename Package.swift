@@ -1,6 +1,23 @@
 // swift-tools-version: 6.2
 
+import Foundation
 import PackageDescription
+
+let packageDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+let localQuiverPackagesRoot = Context.environment["QUIVER_PACKAGES_PATH"] ?? ".."
+
+func quiverPackage(_ repository: String) -> Package.Dependency {
+    let localURL = URL(fileURLWithPath: localQuiverPackagesRoot, relativeTo: packageDirectory)
+        .appendingPathComponent(repository)
+        .standardizedFileURL
+    let manifestURL = localURL.appendingPathComponent("Package.swift")
+
+    if FileManager.default.fileExists(atPath: manifestURL.path) {
+        return .package(path: localURL.path)
+    }
+
+    return .package(url: "https://github.com/hironichu/\(repository).git", branch: "main")
+}
 
 let package = Package(
     name: "quiver-auth",
@@ -15,8 +32,8 @@ let package = Package(
         .library(name: "QuiverAuth", targets: ["QuiverAuth"]),
     ],
     dependencies: [
-        .package(path: "../quiver-http3"),
-        .package(path: "../quiver-quic"),
+        quiverPackage("quiver-http3"),
+        quiverPackage("quiver-quic"),
         .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"4.5.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.12.0"),
         .package(url: "https://github.com/vapor/jwt-kit.git", from: "5.5.0"),
