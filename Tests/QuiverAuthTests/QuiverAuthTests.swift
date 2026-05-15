@@ -700,6 +700,85 @@ struct QuiverAuthTests {
     }
 
     @Test
+    func oidcProviderAccessTokenReturnsStoredServerSessionToken() async {
+        let config = AuthConfiguration(
+            mode: .oidcOnly,
+            sessionCookieNames: ["z-token"],
+            oidc: OIDCConfiguration(
+                login: OIDCLoginConfiguration(
+                    serverSession: OIDCServerSessionConfiguration(enabled: true)
+                )
+            )
+        )
+        let policy = AuthPolicy(configuration: config)
+
+        let expiresAt = Date().addingTimeInterval(300)
+        let record = await OIDCServerSessionStore.shared.create(
+            tokenSet: OIDCTokenSet(
+                accessToken: "provider-access-token",
+                idToken: testJWT(payload: #"{"sub":"sid-user"}"#),
+                refreshToken: "provider-refresh-token",
+                tokenType: "Bearer",
+                scope: "openid user:read:email",
+                expiresAt: expiresAt
+            )
+        )
+
+        let request = HTTP3Request(
+            method: .get,
+            authority: "example.test",
+            path: "/private",
+            headers: [("cookie", "z-token=\(record.sessionID)")]
+        )
+
+        let token = await policy.oidcProviderAccessToken(for: request)
+        #expect(token?.accessToken == "provider-access-token")
+        #expect(token?.tokenType == "Bearer")
+        #expect(token?.scope == "openid user:read:email")
+        #expect(token?.expiresAt == expiresAt)
+        #expect(token?.authorizationHeaderValue == "Bearer provider-access-token")
+
+        await OIDCServerSessionStore.shared.delete(sessionID: record.sessionID)
+    }
+
+    @Test
+    func oidcProviderAccessTokenReturnsNilWithoutServerSessionAccessToken() async {
+        let config = AuthConfiguration(
+            mode: .oidcOnly,
+            sessionCookieNames: ["z-token"],
+            oidc: OIDCConfiguration(
+                login: OIDCLoginConfiguration(
+                    serverSession: OIDCServerSessionConfiguration(enabled: true)
+                )
+            )
+        )
+        let policy = AuthPolicy(configuration: config)
+
+        let record = await OIDCServerSessionStore.shared.create(
+            tokenSet: OIDCTokenSet(
+                accessToken: nil,
+                idToken: testJWT(payload: #"{"sub":"sid-user"}"#),
+                refreshToken: nil,
+                tokenType: "Bearer",
+                scope: "openid",
+                expiresAt: Date().addingTimeInterval(300)
+            )
+        )
+
+        let request = HTTP3Request(
+            method: .get,
+            authority: "example.test",
+            path: "/private",
+            headers: [("cookie", "z-token=\(record.sessionID)")]
+        )
+
+        let token = await policy.oidcProviderAccessToken(for: request)
+        #expect(token == nil)
+
+        await OIDCServerSessionStore.shared.delete(sessionID: record.sessionID)
+    }
+
+    @Test
     func oidcServerSessionRejectsUnknownSessionID() async {
         let config = AuthConfiguration(
             mode: .oidcOnly,

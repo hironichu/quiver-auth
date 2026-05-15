@@ -590,6 +590,52 @@ public struct AuthPolicy: Sendable {
         }
     }
 
+    /// Returns the current provider access token for an OIDC server session.
+    ///
+    /// Use this from server-side route handlers when an application needs to call provider APIs
+    /// on behalf of the logged-in user. For example, a Twitch integration can use the returned
+    /// token as `Authorization: Bearer <token>` when calling Twitch Helix endpoints.
+    ///
+    /// The token is read from QuiverAuth's opaque server-side OIDC session. If the stored token
+    /// is within the configured refresh leeway, QuiverAuth attempts to refresh it before returning.
+    /// This method returns `nil` when OIDC server sessions are not configured, the request has no
+    /// valid OIDC session cookie, the session has no access token, or refresh fails.
+    public func oidcProviderAccessToken(for request: HTTP3Request) async -> OIDCProviderAccessToken? {
+        guard let oidcConfiguration = configuration.oidc else { return nil }
+        let sessionConfiguration = oidcConfiguration.login.serverSession
+        guard sessionConfiguration.enabled else { return nil }
+
+        let snapshot = extractor.snapshot(request: request, configuration: configuration)
+        guard let sessionID = oidcSessionCookieValue(from: snapshot) else { return nil }
+        guard let sessionRecord = await OIDCServerSessionStore.shared.get(sessionID: sessionID) else { return nil }
+
+        let hydratedRecord: OIDCServerSessionRecord
+        if sessionRecord.tokenSet.shouldRefresh(leewaySeconds: sessionConfiguration.refreshLeewaySeconds) {
+            guard let refreshedRecord = await refreshOIDCSessionRecordIfPossible(
+                sessionRecord,
+                request: request,
+                oidcConfiguration: oidcConfiguration
+            ) else {
+                await OIDCServerSessionStore.shared.delete(sessionID: sessionID)
+                return nil
+            }
+            hydratedRecord = refreshedRecord
+        } else {
+            hydratedRecord = sessionRecord
+        }
+
+        guard let accessToken = hydratedRecord.tokenSet.accessToken, !accessToken.isEmpty else {
+            return nil
+        }
+
+        return OIDCProviderAccessToken(
+            accessToken: accessToken,
+            tokenType: hydratedRecord.tokenSet.tokenType,
+            scope: hydratedRecord.tokenSet.scope,
+            expiresAt: hydratedRecord.tokenSet.expiresAt
+        )
+    }
+
     private func fetchUserInfoClaims(
         endpoint: String,
         accessToken: String

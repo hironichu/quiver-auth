@@ -711,6 +711,46 @@ public struct OIDCServerSessionConfiguration: Sendable {
     }
 }
 
+/// Server-side provider access token associated with an OIDC browser session.
+public struct OIDCProviderAccessToken: Sendable, Equatable {
+    /// OAuth/OIDC access token returned by the identity provider.
+    public let accessToken: String
+    /// Token type returned by the provider, usually `Bearer`.
+    public let tokenType: String?
+    /// Space-delimited scopes granted for the access token, when returned by the provider.
+    public let scope: String?
+    /// Server-side expiration timestamp for the token, when returned by the provider.
+    public let expiresAt: Date?
+
+    /// Value suitable for an HTTP `Authorization` header.
+    public var authorizationHeaderValue: String {
+        let effectiveTokenType = tokenType?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let effectiveTokenType, !effectiveTokenType.isEmpty else {
+            return "Bearer \(accessToken)"
+        }
+        return "\(effectiveTokenType) \(accessToken)"
+    }
+
+    /// Whether the token expiration timestamp has passed.
+    public var isExpired: Bool {
+        guard let expiresAt else { return false }
+        return expiresAt <= Date()
+    }
+
+    /// Creates a provider access-token snapshot.
+    public init(
+        accessToken: String,
+        tokenType: String? = nil,
+        scope: String? = nil,
+        expiresAt: Date? = nil
+    ) {
+        self.accessToken = accessToken
+        self.tokenType = tokenType
+        self.scope = scope
+        self.expiresAt = expiresAt
+    }
+}
+
 /// Configuration for QuiverAuth-issued application JWTs.
 public struct AuthJWTIssuerConfiguration: Sendable, Equatable {
     /// Token issuer (`iss`). When set, validators should use the same value in `OIDCConfiguration.issuer`.
