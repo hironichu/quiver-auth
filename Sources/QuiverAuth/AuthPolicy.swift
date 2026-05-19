@@ -490,7 +490,8 @@ public struct AuthPolicy: Sendable {
                 refreshToken: refreshToken,
                 clientID: clientID,
                 clientSecret: oidcConfiguration.login.clientSecret,
-                tokenEndpointAuthMethod: tokenAuthMethod
+                tokenEndpointAuthMethod: tokenAuthMethod,
+                extraParameters: oidcConfiguration.login.extraTokenParameters
             )
 
             let refreshedSet = OIDCTokenSet(
@@ -499,9 +500,7 @@ public struct AuthPolicy: Sendable {
                 refreshToken: refreshedResponse.refreshToken ?? sessionRecord.tokenSet.refreshToken,
                 tokenType: refreshedResponse.tokenType ?? sessionRecord.tokenSet.tokenType,
                 scope: refreshedResponse.scope ?? sessionRecord.tokenSet.scope,
-                expiresAt: refreshedResponse.expiresIn.map {
-                    Date().addingTimeInterval(TimeInterval(max(1, $0)))
-                } ?? sessionRecord.tokenSet.expiresAt
+                expiresAt: refreshedResponse.expiresAt ?? sessionRecord.tokenSet.expiresAt
             )
 
             return await OIDCServerSessionStore.shared.update(
@@ -606,6 +605,7 @@ public struct AuthPolicy: Sendable {
         guard sessionConfiguration.enabled else { return nil }
 
         let snapshot = extractor.snapshot(request: request, configuration: configuration)
+
         guard let sessionID = oidcSessionCookieValue(from: snapshot) else { return nil }
         guard let sessionRecord = await OIDCServerSessionStore.shared.get(sessionID: sessionID) else { return nil }
 
@@ -633,6 +633,55 @@ public struct AuthPolicy: Sendable {
             tokenType: hydratedRecord.tokenSet.tokenType,
             scope: hydratedRecord.tokenSet.scope,
             expiresAt: hydratedRecord.tokenSet.expiresAt
+        )
+    }
+
+    /// Returns the current provider token response for an OIDC server session.
+    ///
+    /// This exposes an OAuthKit-style token response snapshot for explicit server-side
+    /// use. It returns `nil` when OIDC server sessions are disabled, the request has no
+    /// valid OIDC session cookie, or token refresh fails. Refresh tokens are intentionally
+    /// only available through this explicit method and are never attached to `HTTP3Session`.
+    public func oidcTokenResponse(for request: HTTP3Request) async -> OIDCTokenResponse? {
+        guard let oidcConfiguration = configuration.oidc else { return nil }
+        let sessionConfiguration = oidcConfiguration.login.serverSession
+        guard sessionConfiguration.enabled else { return nil }
+
+        let snapshot = extractor.snapshot(request: request, configuration: configuration)
+        guard let sessionID = oidcSessionCookieValue(from: snapshot) else { return nil }
+        guard let sessionRecord = await OIDCServerSessionStore.shared.get(sessionID: sessionID) else { return nil }
+
+        let hydratedRecord: OIDCServerSessionRecord
+        if sessionRecord.tokenSet.shouldRefresh(leewaySeconds: sessionConfiguration.refreshLeewaySeconds) {
+            guard let refreshedRecord = await refreshOIDCSessionRecordIfPossible(
+                sessionRecord,
+                request: request,
+                oidcConfiguration: oidcConfiguration
+            ) else {
+                await OIDCServerSessionStore.shared.delete(sessionID: sessionID)
+                return nil
+            }
+            hydratedRecord = refreshedRecord
+        } else {
+            hydratedRecord = sessionRecord
+        }
+
+        return oidcTokenResponse(from: hydratedRecord.tokenSet, updatedAt: hydratedRecord.updatedAt)
+    }
+
+    private func oidcTokenResponse(from tokenSet: OIDCTokenSet, updatedAt: Date) -> OIDCTokenResponse {
+        let expiresIn: Int? = tokenSet.expiresAt.map {
+            max(1, Int(ceil($0.timeIntervalSince(updatedAt))))
+        }
+
+        return OIDCTokenResponse(
+            accessToken: tokenSet.accessToken,
+            tokenType: tokenSet.tokenType,
+            expiresIn: expiresIn,
+            refreshToken: tokenSet.refreshToken,
+            scope: tokenSet.scope,
+            idToken: tokenSet.idToken,
+            createdAt: updatedAt
         )
     }
 
@@ -697,7 +746,8 @@ public struct AuthPolicy: Sendable {
         refreshToken: String,
         clientID: String,
         clientSecret: String?,
-        tokenEndpointAuthMethod: OIDCTokenEndpointAuthMethod
+        tokenEndpointAuthMethod: OIDCTokenEndpointAuthMethod,
+        extraParameters: [String: String]
     ) async throws -> OIDCTokenResponse {
         guard let url = URL(string: tokenEndpoint) else {
             throw NSError(
@@ -712,6 +762,10 @@ public struct AuthPolicy: Sendable {
             ("refresh_token", refreshToken),
             ("client_id", clientID),
         ]
+
+        for (name, value) in extraParameters {
+            form.append((name, value))
+        }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -946,6 +1000,7 @@ public struct AuthPolicy: Sendable {
         }
 
         let callbackHandler = OIDCLoginCallbackHandler(
+            oidcConfiguration: oidc,
             configuration: loginConfiguration,
             fallbackDiscoveryURL: fallbackDiscoveryURL
         )

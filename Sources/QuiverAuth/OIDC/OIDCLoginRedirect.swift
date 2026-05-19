@@ -273,6 +273,7 @@ struct OIDCLoginRedirectBuilder: Sendable {
 }
 
 struct OIDCLoginCallbackHandler: Sendable {
+    let oidcConfiguration: OIDCConfiguration
     let configuration: OIDCLoginConfiguration
     let fallbackDiscoveryURL: String?
 
@@ -350,19 +351,36 @@ struct OIDCLoginCallbackHandler: Sendable {
                 clientID: clientID,
                 clientSecret: configuration.clientSecret,
                 codeVerifier: pending.codeVerifier,
-                tokenEndpointAuthMethod: tokenAuthMethod
+                tokenEndpointAuthMethod: tokenAuthMethod,
+                extraParameters: configuration.extraTokenParameters
             )
 
-            if let idToken = tokenResponse.idToken {
-                guard let nonce = decodeStringClaim("nonce", fromJWT: idToken) else {
+            let validatedClaims: OIDCIDTokenClaims?
+            if let idToken = tokenResponse.idToken, !idToken.isEmpty {
+                do {
+                    validatedClaims = try await validateIDTokenClaims(
+                        idToken,
+                        clientID: clientID
+                    )
+                } catch {
+                    return callbackFailureResponse(reason: "invalid_id_token", request: request)
+                }
+
+                guard let nonce = validatedClaims?.nonce, !nonce.isEmpty else {
                     return callbackFailureResponse(reason: "missing_nonce_in_id_token", request: request)
                 }
                 guard nonce == pending.nonce else {
                     return callbackFailureResponse(reason: "nonce_mismatch", request: request)
                 }
+            } else {
+                if requestedScopesContainOpenID(configuration.scope) || configuration.onLoginCompletion != nil {
+                    return callbackFailureResponse(reason: "missing_id_token", request: request)
+                }
+                validatedClaims = nil
             }
 
             let cookieValue: String
+            let serverSessionID: String?
             if configuration.serverSession.enabled {
                 let tokenSet = OIDCTokenSet(
                     accessToken: tokenResponse.accessToken,
@@ -370,7 +388,7 @@ struct OIDCLoginCallbackHandler: Sendable {
                     refreshToken: tokenResponse.refreshToken,
                     tokenType: tokenResponse.tokenType,
                     scope: tokenResponse.scope,
-                    expiresAt: tokenResponse.expiresIn.map { Date().addingTimeInterval(TimeInterval(max(1, $0))) }
+                    expiresAt: tokenResponse.expiresAt
                 )
 
                 guard tokenSet.validationToken() != nil else {
@@ -380,12 +398,43 @@ struct OIDCLoginCallbackHandler: Sendable {
 
                 let serverSession = await OIDCServerSessionStore.shared.create(tokenSet: tokenSet)
                 cookieValue = serverSession.sessionID
+                serverSessionID = serverSession.sessionID
             } else {
                 guard let sessionToken = tokenResponse.idToken ?? tokenResponse.accessToken, !sessionToken.isEmpty else {
                     oidcLogger.debug("oidc callback missing session token from token response")
                     return callbackFailureResponse(reason: "missing_session_token", request: request)
                 }
                 cookieValue = sessionToken
+                serverSessionID = nil
+            }
+
+            if let onLoginCompletion = configuration.onLoginCompletion {
+                guard let validatedClaims else {
+                    return callbackFailureResponse(reason: "missing_id_token", request: request)
+                }
+
+                let result = OIDCLoginResult(
+                    tokenResponse: tokenResponse,
+                    claims: validatedClaims,
+                    sessionID: serverSessionID,
+                    requestedScope: configuration.scope,
+                    clientID: clientID,
+                    issuer: oidcConfiguration.issuer ?? metadata.issuer,
+                    redirectURI: redirectURI
+                )
+
+                do {
+                    try await onLoginCompletion(result)
+                } catch {
+                    if let serverSessionID {
+                        await OIDCServerSessionStore.shared.delete(sessionID: serverSessionID)
+                    }
+                    oidcLogger.warning(
+                        "oidc login completion handler failed",
+                        metadata: ["error": "\(error.localizedDescription)"]
+                    )
+                    return callbackFailureResponse(reason: "login_completion_failed", request: request)
+                }
             }
 
             let cookie = sessionCookieHeader(
@@ -604,7 +653,8 @@ struct OIDCLoginCallbackHandler: Sendable {
         clientID: String,
         clientSecret: String?,
         codeVerifier: String,
-        tokenEndpointAuthMethod: OIDCTokenEndpointAuthMethod
+        tokenEndpointAuthMethod: OIDCTokenEndpointAuthMethod,
+        extraParameters: [String: String]
     ) async throws -> OIDCTokenResponse {
         guard let url = URL(string: tokenEndpoint) else {
             throw NSError(
@@ -621,6 +671,10 @@ struct OIDCLoginCallbackHandler: Sendable {
             ("client_id", clientID),
             ("code_verifier", codeVerifier),
         ]
+
+        for (name, value) in extraParameters {
+            form.append((name, value))
+        }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -709,49 +763,89 @@ struct OIDCLoginCallbackHandler: Sendable {
         return URL(string: "https://\(authority)\(normalizedPath)")
     }
 
-    private func decodeStringClaim(_ name: String, fromJWT token: String) -> String? {
+    private func validateIDTokenClaims(_ idToken: String, clientID: String) async throws -> OIDCIDTokenClaims {
+        var validationConfiguration = oidcConfiguration
+        if validationConfiguration.audience == nil {
+            validationConfiguration.audience = clientID
+        }
+
+        let validator = OIDCValidator(configuration: validationConfiguration)
+        switch await validator.validate(token: idToken) {
+        case .valid:
+            guard let claimsJSON = decodeClaims(fromJWT: idToken) else {
+                throw NSError(
+                    domain: "QuiverAuth.OIDCLogin",
+                    code: 20,
+                    userInfo: [NSLocalizedDescriptionKey: "invalid_id_token_claims"]
+                )
+            }
+            return try idTokenClaims(from: claimsJSON)
+        case .invalid(let reason):
+            throw NSError(
+                domain: "QuiverAuth.OIDCLogin",
+                code: 21,
+                userInfo: [NSLocalizedDescriptionKey: reason]
+            )
+        }
+    }
+
+    private func idTokenClaims(from claimsJSON: [String: Any]) throws -> OIDCIDTokenClaims {
+        guard let subject = claimsJSON["sub"] as? String, !subject.isEmpty else {
+            throw NSError(
+                domain: "QuiverAuth.OIDCLogin",
+                code: 22,
+                userInfo: [NSLocalizedDescriptionKey: "missing_subject"]
+            )
+        }
+
+        var typedClaims: [String: HTTP3SessionValue] = [:]
+        for (key, value) in claimsJSON {
+            if let mapped = quiverAuthSessionValue(from: value) {
+                typedClaims[key] = mapped
+            }
+        }
+
+        return OIDCIDTokenClaims(
+            issuer: claimsJSON["iss"] as? String,
+            subject: subject,
+            audience: audienceClaim(from: claimsJSON),
+            expiresAt: dateClaim("exp", in: claimsJSON),
+            notBefore: dateClaim("nbf", in: claimsJSON),
+            issuedAt: dateClaim("iat", in: claimsJSON),
+            nonce: claimsJSON["nonce"] as? String,
+            email: claimsJSON["email"] as? String,
+            claims: typedClaims
+        )
+    }
+
+    private func decodeClaims(fromJWT token: String) -> [String: Any]? {
         let parts = token.split(separator: ".", omittingEmptySubsequences: false)
         guard parts.count == 3 else { return nil }
         guard let payloadData = quiverAuthDecodeBase64URL(String(parts[1])) else { return nil }
-        guard let object = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any] else { return nil }
-        return object[name] as? String
-    }
-}
-
-struct OIDCTokenResponse: Decodable {
-    let accessToken: String?
-    let idToken: String?
-    let refreshToken: String?
-    let tokenType: String?
-    /// Normalized to a space-delimited string regardless of whether the provider
-    /// returned a string or an array (both shapes are seen in the wild).
-    let scope: String?
-    let expiresIn: Int?
-
-    enum CodingKeys: String, CodingKey {
-        case accessToken = "access_token"
-        case idToken = "id_token"
-        case refreshToken = "refresh_token"
-        case tokenType = "token_type"
-        case scope
-        case expiresIn = "expires_in"
+        return try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any]
     }
 
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        accessToken = try container.decodeIfPresent(String.self, forKey: .accessToken)
-        idToken = try container.decodeIfPresent(String.self, forKey: .idToken)
-        refreshToken = try container.decodeIfPresent(String.self, forKey: .refreshToken)
-        tokenType = try container.decodeIfPresent(String.self, forKey: .tokenType)
-        expiresIn = try container.decodeIfPresent(Int.self, forKey: .expiresIn)
+    private func audienceClaim(from claims: [String: Any]) -> [String] {
+        if let aud = claims["aud"] as? String { return [aud] }
+        if let audArray = claims["aud"] as? [String] { return audArray }
+        return []
+    }
 
-        if let scopeString = try? container.decodeIfPresent(String.self, forKey: .scope) {
-            scope = scopeString
-        } else if let scopeArray = try? container.decodeIfPresent([String].self, forKey: .scope) {
-            scope = scopeArray.joined(separator: " ")
-        } else {
-            scope = nil
+    private func dateClaim(_ name: String, in claims: [String: Any]) -> Date? {
+        if let intValue = claims[name] as? Int {
+            return Date(timeIntervalSince1970: TimeInterval(intValue))
         }
+        if let doubleValue = claims[name] as? Double {
+            return Date(timeIntervalSince1970: doubleValue)
+        }
+        if let stringValue = claims[name] as? String, let doubleValue = Double(stringValue) {
+            return Date(timeIntervalSince1970: doubleValue)
+        }
+        return nil
+    }
+
+    private func requestedScopesContainOpenID(_ scope: String) -> Bool {
+        scope.split(separator: " ").contains { $0.caseInsensitiveCompare("openid") == .orderedSame }
     }
 }
 

@@ -742,6 +742,65 @@ struct QuiverAuthTests {
     }
 
     @Test
+    func oidcTokenResponseDecodesProviderShapeAndHelpers() throws {
+        let data = Data(
+            #"{"access_token":"access-1","token_type":"Bearer","expires_in":3600,"refresh_token":"refresh-1","scope":["openid","chat:read"],"id_token":"id-token"}"#.utf8
+        )
+
+        let response = try JSONDecoder().decode(OIDCTokenResponse.self, from: data)
+
+        #expect(response.accessToken == "access-1")
+        #expect(response.refreshToken == "refresh-1")
+        #expect(response.scope == "openid chat:read")
+        #expect(response.idToken == "id-token")
+        #expect(response.authorizationHeaderValue == "Bearer access-1")
+        #expect(response.expiresAt != nil)
+        #expect(response.isExpired(buffer: 0) == false)
+    }
+
+    @Test
+    func oidcTokenResponseReturnsStoredServerSessionTokenMaterial() async {
+        let config = AuthConfiguration(
+            mode: .oidcOnly,
+            sessionCookieNames: ["z-token"],
+            oidc: OIDCConfiguration(
+                login: OIDCLoginConfiguration(
+                    serverSession: OIDCServerSessionConfiguration(enabled: true)
+                )
+            )
+        )
+        let policy = AuthPolicy(configuration: config)
+
+        let expiresAt = Date().addingTimeInterval(300)
+        let record = await OIDCServerSessionStore.shared.create(
+            tokenSet: OIDCTokenSet(
+                accessToken: "provider-access-token",
+                idToken: testJWT(payload: #"{"sub":"sid-user"}"#),
+                refreshToken: "provider-refresh-token",
+                tokenType: "Bearer",
+                scope: "openid user:read:email",
+                expiresAt: expiresAt
+            )
+        )
+
+        let request = HTTP3Request(
+            method: .get,
+            authority: "example.test",
+            path: "/private",
+            headers: [("cookie", "z-token=\(record.sessionID)")]
+        )
+
+        let tokenResponse = await policy.oidcTokenResponse(for: request)
+        #expect(tokenResponse?.accessToken == "provider-access-token")
+        #expect(tokenResponse?.refreshToken == "provider-refresh-token")
+        #expect(tokenResponse?.tokenType == "Bearer")
+        #expect(tokenResponse?.scope == "openid user:read:email")
+        #expect(tokenResponse?.authorizationHeaderValue == "Bearer provider-access-token")
+
+        await OIDCServerSessionStore.shared.delete(sessionID: record.sessionID)
+    }
+
+    @Test
     func oidcProviderAccessTokenReturnsNilWithoutServerSessionAccessToken() async {
         let config = AuthConfiguration(
             mode: .oidcOnly,

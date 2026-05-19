@@ -519,6 +519,177 @@ public enum OIDCTokenEndpointAuthMethod: String, Sendable, Codable {
     case none = "none"
 }
 
+/// OAuth/OpenID Connect token response returned by a provider token endpoint.
+public struct OIDCTokenResponse: Codable, Sendable, Equatable {
+    /// OAuth/OIDC access token returned by the provider.
+    public let accessToken: String?
+    /// Token type returned by the provider, usually `Bearer`.
+    public let tokenType: String?
+    /// Token lifetime in seconds from `createdAt`, when returned by the provider.
+    public let expiresIn: Int?
+    /// Refresh token returned by the provider, when granted.
+    public let refreshToken: String?
+    /// Space-delimited scopes granted for the token, when returned by the provider.
+    public let scope: String?
+    /// OpenID Connect ID Token JWT, when returned by the provider.
+    public let idToken: String?
+    /// Local timestamp when this token response was decoded or created.
+    public let createdAt: Date
+
+    /// Absolute expiration timestamp derived from `createdAt` and `expiresIn`.
+    public var expiresAt: Date? {
+        expiresIn.map { createdAt.addingTimeInterval(TimeInterval(max(1, $0))) }
+    }
+
+    /// Value suitable for an HTTP `Authorization` header, when an access token is present.
+    public var authorizationHeaderValue: String? {
+        guard let accessToken, !accessToken.isEmpty else { return nil }
+        let effectiveTokenType = tokenType?.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let effectiveTokenType, !effectiveTokenType.isEmpty else {
+            return "Bearer \(accessToken)"
+        }
+        return "\(effectiveTokenType) \(accessToken)"
+    }
+
+    /// Creates a token response snapshot.
+    public init(
+        accessToken: String? = nil,
+        tokenType: String? = nil,
+        expiresIn: Int? = nil,
+        refreshToken: String? = nil,
+        scope: String? = nil,
+        idToken: String? = nil,
+        createdAt: Date = Date()
+    ) {
+        self.accessToken = accessToken
+        self.tokenType = tokenType
+        self.expiresIn = expiresIn
+        self.refreshToken = refreshToken
+        self.scope = scope
+        self.idToken = idToken
+        self.createdAt = createdAt
+    }
+
+    /// Whether the token is expired or will expire within the given buffer.
+    public func isExpired(buffer: TimeInterval = 60) -> Bool {
+        guard let expiresAt else { return false }
+        return Date().addingTimeInterval(max(0, buffer)) >= expiresAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case accessToken = "access_token"
+        case tokenType = "token_type"
+        case expiresIn = "expires_in"
+        case refreshToken = "refresh_token"
+        case scope
+        case idToken = "id_token"
+        case createdAt = "created_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        accessToken = try container.decodeIfPresent(String.self, forKey: .accessToken)
+        tokenType = try container.decodeIfPresent(String.self, forKey: .tokenType)
+        expiresIn = try container.decodeIfPresent(Int.self, forKey: .expiresIn)
+        refreshToken = try container.decodeIfPresent(String.self, forKey: .refreshToken)
+        idToken = try container.decodeIfPresent(String.self, forKey: .idToken)
+        createdAt = try container.decodeIfPresent(Date.self, forKey: .createdAt) ?? Date()
+
+        if let scopeString = try? container.decodeIfPresent(String.self, forKey: .scope) {
+            scope = scopeString
+        } else if let scopeArray = try? container.decodeIfPresent([String].self, forKey: .scope) {
+            scope = scopeArray.joined(separator: " ")
+        } else {
+            scope = nil
+        }
+    }
+}
+
+/// Validated OpenID Connect ID Token claims.
+public struct OIDCIDTokenClaims: Sendable, Equatable {
+    /// Token issuer (`iss`).
+    public let issuer: String?
+    /// Stable subject identifier (`sub`).
+    public let subject: String
+    /// Token audience values (`aud`).
+    public let audience: [String]
+    /// Expiration timestamp (`exp`).
+    public let expiresAt: Date?
+    /// Not-before timestamp (`nbf`).
+    public let notBefore: Date?
+    /// Issued-at timestamp (`iat`).
+    public let issuedAt: Date?
+    /// Nonce associated with the OIDC authorization request.
+    public let nonce: String?
+    /// Optional email claim.
+    public let email: String?
+    /// Additional typed claims decoded from the ID Token.
+    public let claims: [String: HTTP3SessionValue]
+
+    /// Creates an ID Token claims snapshot.
+    public init(
+        issuer: String? = nil,
+        subject: String,
+        audience: [String] = [],
+        expiresAt: Date? = nil,
+        notBefore: Date? = nil,
+        issuedAt: Date? = nil,
+        nonce: String? = nil,
+        email: String? = nil,
+        claims: [String: HTTP3SessionValue] = [:]
+    ) {
+        self.issuer = issuer
+        self.subject = subject
+        self.audience = audience
+        self.expiresAt = expiresAt
+        self.notBefore = notBefore
+        self.issuedAt = issuedAt
+        self.nonce = nonce
+        self.email = email
+        self.claims = claims
+    }
+}
+
+/// Result produced by a successful OIDC authorization-code callback.
+public struct OIDCLoginResult: Sendable, Equatable {
+    /// Provider token response.
+    public let tokenResponse: OIDCTokenResponse
+    /// Validated ID Token claims.
+    public let claims: OIDCIDTokenClaims
+    /// Opaque server-session identifier, when server sessions are enabled.
+    public let sessionID: String?
+    /// Requested authorization scope from `OIDCLoginConfiguration.scope`.
+    public let requestedScope: String
+    /// OAuth client identifier used for this login.
+    public let clientID: String?
+    /// Expected or discovered issuer, when known.
+    public let issuer: String?
+    /// Redirect URI used during token exchange.
+    public let redirectURI: String
+
+    /// Creates an OIDC login result snapshot.
+    public init(
+        tokenResponse: OIDCTokenResponse,
+        claims: OIDCIDTokenClaims,
+        sessionID: String? = nil,
+        requestedScope: String,
+        clientID: String? = nil,
+        issuer: String? = nil,
+        redirectURI: String
+    ) {
+        self.tokenResponse = tokenResponse
+        self.claims = claims
+        self.sessionID = sessionID
+        self.requestedScope = requestedScope
+        self.clientID = clientID
+        self.issuer = issuer
+        self.redirectURI = redirectURI
+    }
+}
+
+/// Callback invoked after a successful OIDC login has exchanged and validated tokens.
+public typealias OIDCLoginCompletionHandler = @Sendable (OIDCLoginResult) async throws -> Void
+
 /// Configuration for OIDC/JWT validation and optional browser login flows.
 public struct OIDCConfiguration: Sendable {
     /// Expected token issuer (`iss`).
@@ -598,6 +769,8 @@ public struct OIDCLoginConfiguration: Sendable {
     public var prompt: String?
     /// Additional authorization request parameters.
     public var extraAuthorizationParameters: [String: String]
+    /// Additional token request parameters sent during code exchange and refresh.
+    public var extraTokenParameters: [String: String]
     /// Name of the OIDC browser session cookie.
     public var sessionCookieName: String
     /// Whether the OIDC session cookie includes the `Secure` attribute.
@@ -617,6 +790,8 @@ public struct OIDCLoginConfiguration: Sendable {
     public var tokenEndpointAuthMethod: OIDCTokenEndpointAuthMethod?
     /// Path to redirect to after a successful logout. Defaults to `"/"`.
     public var postLogoutPath: String
+    /// Optional callback invoked after a successful OIDC login has validated token material.
+    public var onLoginCompletion: OIDCLoginCompletionHandler?
 
     /// Creates browser OIDC login configuration.
     public init(
@@ -636,6 +811,7 @@ public struct OIDCLoginConfiguration: Sendable {
         responseType: String = "code",
         prompt: String? = nil,
         extraAuthorizationParameters: [String: String] = [:],
+        extraTokenParameters: [String: String] = [:],
         sessionCookieName: String = "z-token",
         sessionCookieSecure: Bool = true,
         sessionCookieHTTPOnly: Bool = true,
@@ -644,7 +820,8 @@ public struct OIDCLoginConfiguration: Sendable {
         serverSession: OIDCServerSessionConfiguration = OIDCServerSessionConfiguration(),
         browserOnly: Bool = true,
         tokenEndpointAuthMethod: OIDCTokenEndpointAuthMethod? = nil,
-        postLogoutPath: String = "/"
+        postLogoutPath: String = "/",
+        onLoginCompletion: OIDCLoginCompletionHandler? = nil
     ) {
         self.enabled = enabled
         self.discoveryURL = discoveryURL
@@ -662,6 +839,7 @@ public struct OIDCLoginConfiguration: Sendable {
         self.responseType = responseType
         self.prompt = prompt
         self.extraAuthorizationParameters = extraAuthorizationParameters
+        self.extraTokenParameters = extraTokenParameters
         self.sessionCookieName = sessionCookieName
         self.sessionCookieSecure = sessionCookieSecure
         self.sessionCookieHTTPOnly = sessionCookieHTTPOnly
@@ -671,6 +849,7 @@ public struct OIDCLoginConfiguration: Sendable {
         self.browserOnly = browserOnly
         self.tokenEndpointAuthMethod = tokenEndpointAuthMethod
         self.postLogoutPath = postLogoutPath
+        self.onLoginCompletion = onLoginCompletion
     }
 }
 
