@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 
 actor OIDCJWKSCache {
     static let shared = OIDCJWKSCache()
@@ -19,8 +16,8 @@ actor OIDCJWKSCache {
             return cached.jwks
         }
 
-        let (data, _) = try await URLSession.shared.data(from: url)
-        let decoded = try JSONDecoder().decode(OIDCJWKS.self, from: data)
+        let response = try await QuiverAuthHTTPClient.get(url: url)
+        let decoded = try JSONDecoder().decode(OIDCJWKS.self, from: response.body)
         let expiry = Date().addingTimeInterval(TimeInterval(max(1, ttlSeconds)))
         entries[cacheKey] = CacheEntry(expiresAt: expiry, jwks: decoded)
         return decoded

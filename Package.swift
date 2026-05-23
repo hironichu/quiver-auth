@@ -38,6 +38,7 @@ let package = Package(
         quiverPackage("quiver-quic"),
         .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"4.5.0"),
         .package(url: "https://github.com/apple/swift-log.git", from: "1.12.0"),
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.30.0"),
         .package(url: "https://github.com/vapor/jwt-kit.git", from: "5.5.0"),
     ],
     targets: [
@@ -48,6 +49,7 @@ let package = Package(
                 .product(name: "QUICCore", package: "quiver-quic"),
                 .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "Logging", package: "swift-log"),
+                .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "JWTKit", package: "jwt-kit"),
             ],
             path: "Sources/QuiverAuth"

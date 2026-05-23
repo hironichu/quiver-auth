@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import HTTP3
 import QUICCore
 
@@ -697,33 +694,27 @@ public struct AuthPolicy: Sendable {
             )
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "GET"
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "authorization")
-        request.setValue("application/json", forHTTPHeaderField: "accept")
+        let response = try await QuiverAuthHTTPClient.get(
+            url: url,
+            headers: [
+                ("authorization", "Bearer \(accessToken)"),
+                ("accept", "application/json"),
+            ]
+        )
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(
-                domain: "QuiverAuth.AuthPolicy",
-                code: 3002,
-                userInfo: [NSLocalizedDescriptionKey: "invalid_userinfo_response"]
-            )
-        }
-
-        guard 200..<300 ~= httpResponse.statusCode else {
-            let bodySnippet = String(data: data, encoding: .utf8) ?? "<non-utf8-body>"
+        guard 200..<300 ~= response.statusCode else {
+            let bodySnippet = String(data: response.body, encoding: .utf8) ?? "<non-utf8-body>"
             throw NSError(
                 domain: "QuiverAuth.AuthPolicy",
                 code: 3003,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "userinfo_http_\(httpResponse.statusCode):\(bodySnippet.prefix(300))",
+                        "userinfo_http_\(response.statusCode):\(bodySnippet.prefix(300))",
                 ]
             )
         }
 
-        let payload = try JSONSerialization.jsonObject(with: data)
+        let payload = try JSONSerialization.jsonObject(with: response.body)
         guard let object = payload as? [String: Any] else {
             throw NSError(
                 domain: "QuiverAuth.AuthPolicy",
@@ -767,17 +758,17 @@ public struct AuthPolicy: Sendable {
             form.append((name, value))
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "content-type")
-        request.setValue("application/json", forHTTPHeaderField: "accept")
+        var headers: [(String, String)] = [
+            ("content-type", "application/x-www-form-urlencoded"),
+            ("accept", "application/json"),
+        ]
 
         switch tokenEndpointAuthMethod {
         case .clientSecretBasic:
             if let clientSecret, !clientSecret.isEmpty {
                 let credentials = "\(clientID):\(clientSecret)"
                 let encoded = Data(credentials.utf8).base64EncodedString()
-                request.setValue("Basic \(encoded)", forHTTPHeaderField: "authorization")
+                headers.append(("authorization", "Basic \(encoded)"))
             }
         case .clientSecretPost:
             if let clientSecret, !clientSecret.isEmpty {
@@ -787,30 +778,25 @@ public struct AuthPolicy: Sendable {
             break
         }
 
-        request.httpBody = Data(oidcFormURLEncoded(form).utf8)
+        let response = try await QuiverAuthHTTPClient.post(
+            url: url,
+            headers: headers,
+            body: Data(oidcFormURLEncoded(form).utf8)
+        )
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(
-                domain: "QuiverAuth.AuthPolicy",
-                code: 2002,
-                userInfo: [NSLocalizedDescriptionKey: "invalid_refresh_response"]
-            )
-        }
-
-        guard 200..<300 ~= httpResponse.statusCode else {
-            let bodySnippet = String(data: data, encoding: .utf8) ?? "<non-utf8-body>"
+        guard 200..<300 ~= response.statusCode else {
+            let bodySnippet = String(data: response.body, encoding: .utf8) ?? "<non-utf8-body>"
             throw NSError(
                 domain: "QuiverAuth.AuthPolicy",
                 code: 2003,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "refresh_endpoint_http_\(httpResponse.statusCode):\(bodySnippet.prefix(300))",
+                        "refresh_endpoint_http_\(response.statusCode):\(bodySnippet.prefix(300))",
                 ]
             )
         }
 
-        return try JSONDecoder().decode(OIDCTokenResponse.self, from: data)
+        return try JSONDecoder().decode(OIDCTokenResponse.self, from: response.body)
     }
 
     private func claimsString(_ key: String, in claims: [String: HTTP3SessionValue]) -> String? {

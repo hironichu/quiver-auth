@@ -1,7 +1,4 @@
 import Foundation
-#if canImport(FoundationNetworking)
-import FoundationNetworking
-#endif
 import Crypto
 import HTTP3
 import QUICCore
@@ -56,8 +53,8 @@ actor OIDCDiscoveryCache {
             return cached.metadata
         }
 
-        let (data, _) = try await URLSession.shared.data(from: discoveryURL)
-        let document = try JSONDecoder().decode(OIDCDiscoveryDocument.self, from: data)
+        let response = try await QuiverAuthHTTPClient.get(url: discoveryURL)
+        let document = try JSONDecoder().decode(OIDCDiscoveryDocument.self, from: response.body)
         let metadata = OIDCDiscoveryMetadata(
             authorizationEndpoint: document.authorization_endpoint,
             tokenEndpoint: document.token_endpoint,
@@ -676,17 +673,17 @@ struct OIDCLoginCallbackHandler: Sendable {
             form.append((name, value))
         }
 
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "content-type")
-        request.setValue("application/json", forHTTPHeaderField: "accept")
+        var headers: [(String, String)] = [
+            ("content-type", "application/x-www-form-urlencoded"),
+            ("accept", "application/json"),
+        ]
 
         switch tokenEndpointAuthMethod {
         case .clientSecretBasic:
             if let clientSecret, !clientSecret.isEmpty {
                 let credentials = "\(clientID):\(clientSecret)"
                 let encoded = Data(credentials.utf8).base64EncodedString()
-                request.setValue("Basic \(encoded)", forHTTPHeaderField: "authorization")
+                headers.append(("authorization", "Basic \(encoded)"))
             }
         case .clientSecretPost:
             if let clientSecret, !clientSecret.isEmpty {
@@ -696,33 +693,28 @@ struct OIDCLoginCallbackHandler: Sendable {
             break
         }
 
-        request.httpBody = Data(oidcFormURLEncoded(form).utf8)
+        let response = try await QuiverAuthHTTPClient.post(
+            url: url,
+            headers: headers,
+            body: Data(oidcFormURLEncoded(form).utf8)
+        )
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(
-                domain: "QuiverAuth.OIDCLogin",
-                code: 2,
-                userInfo: [NSLocalizedDescriptionKey: "token_endpoint_invalid_response"]
-            )
-        }
-
-        guard 200..<300 ~= httpResponse.statusCode else {
-            let bodySnippet = String(data: data, encoding: .utf8) ?? "<non-utf8-body>"
+        guard 200..<300 ~= response.statusCode else {
+            let bodySnippet = String(data: response.body, encoding: .utf8) ?? "<non-utf8-body>"
             throw NSError(
                 domain: "QuiverAuth.OIDCLogin",
                 code: 3,
                 userInfo: [
                     NSLocalizedDescriptionKey:
-                        "token_endpoint_http_\(httpResponse.statusCode):\(bodySnippet.prefix(300))",
+                        "token_endpoint_http_\(response.statusCode):\(bodySnippet.prefix(300))",
                 ]
             )
         }
 
         do {
-            return try JSONDecoder().decode(OIDCTokenResponse.self, from: data)
+            return try JSONDecoder().decode(OIDCTokenResponse.self, from: response.body)
         } catch {
-            let bodySnippet = String(data: data, encoding: .utf8) ?? "<non-utf8-body>"
+            let bodySnippet = String(data: response.body, encoding: .utf8) ?? "<non-utf8-body>"
             throw NSError(
                 domain: "QuiverAuth.OIDCLogin",
                 code: 4,
