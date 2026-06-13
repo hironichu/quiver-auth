@@ -36,9 +36,9 @@ let package = Package(
     dependencies: [
         quiverPackage("quiver-http3"),
         quiverPackage("quiver-quic"),
-        .package(url: "https://github.com/apple/swift-crypto.git", "3.0.0"..<"4.5.0"),
-        .package(url: "https://github.com/apple/swift-log.git", from: "1.12.0"),
-        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.30.0"),
+        .package(url: "https://github.com/apple/swift-crypto.git", from: "4.1.0"),
+        .package(url: "https://github.com/apple/swift-log.git", from: "1.13.1"),
+        .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.34.0"),
         .package(url: "https://github.com/vapor/jwt-kit.git", from: "5.5.0"),
     ],
     targets: [
